@@ -93,8 +93,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         live_options=LiveOptions(
-            language=Language.IT,
-            model="nova-2-general",
+            # language=Language.IT,
+            model="nova-3",
         )
     )
     # tts = ElevenLabsTTSService(
@@ -104,7 +104,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     # )
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),model='sonic-3-latest',
-        voice_id="209d9a43-03eb-40d8-a7b7-51a6d54c052f",  # British Reading Lady
+        voice_id="d718e944-b313-4998-b011-d1cc078d4ef3",  # British Reading Lady
     )
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"),model='gpt-4o',params=OpenAILLMService.InputParams(max_completion_tokens=256))
     messages = [
@@ -144,12 +144,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True,
         ),
         observers=[RTVIObserver(rtvi)],
-    )
-    flow_manager = FlowManager(
-        task=task,
-        llm=llm,
-        context_aggregator=context_aggregator,
-        transport=transport,
     )
 
 
