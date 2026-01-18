@@ -18,9 +18,8 @@ Run the bot using::
 
     uv run bot.py
 """
-
 import os
-
+from pipecat.transcriptions.language import Language
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -33,13 +32,13 @@ from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnal
 logger.info("✅ Local Smart Turn Analyzer V3 loaded")
 logger.info("Loading Silero VAD model...")
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-
 logger.info("✅ Silero VAD model loaded")
-
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import LLMRunFrame
-
-logger.info("Loading pipeline components...")
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.services.llm_service import FunctionCallParams
+#from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -50,49 +49,91 @@ from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
+from deepgram import LiveOptions
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
+
 
 logger.info("✅ All components loaded successfully!")
 
 load_dotenv(override=True)
 
 
+weather_function = FunctionSchema(
+    name="get_current_weather",
+    description="Get the current weather in a location",
+    properties={
+        "location": {
+            "type": "string",
+            "description": "The city and state, e.g. San Francisco, CA",
+        },
+        "format": {
+            "type": "string",
+            "enum": ["celsius", "fahrenheit"],
+            "description": "The temperature unit to use.",
+        },
+    },
+    required=["location", "format"]
+)
+
+async def fetch_weather_from_api(params: FunctionCallParams):
+    # Fetch weather data from your API
+    weather_data = {"conditions": "sunny", "temperature": "75"}
+    await params.result_callback(weather_data)
+tools = ToolsSchema(standard_tools=[weather_function])
+
+import os
+from datetime import datetime
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
-
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
-
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
+    
+    
+    stt = DeepgramSTTService(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+        live_options=LiveOptions(
+            language=Language.IT,
+            model="nova-2-general",
+        )
     )
-
-    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
-
+    # tts = ElevenLabsTTSService(
+    #     api_key=os.getenv("ELEVENLABS_API_KEY"), 
+    #     voice_id='TRnaQb7q41oL7sV0w6Bu', 
+    #     sample_rate=16000
+    # )
+    tts = CartesiaTTSService(
+        api_key=os.getenv("CARTESIA_API_KEY"),model='sonic-3-latest',
+        voice_id="209d9a43-03eb-40d8-a7b7-51a6d54c052f",  # British Reading Lady
+    )
+    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"),model='gpt-4o',params=OpenAILLMService.InputParams(max_completion_tokens=256))
     messages = [
         {
             "role": "system",
-            "content": "You are a friendly AI assistant. Respond naturally and keep your answers conversational.",
+            "content": (
+                "Sei un amichevole assistente telefonico. Le tue risposte saranno lette ad alta voce. "
+                "Parla in modo naturale e conciso in italiano."
+            ),
         },
     ]
 
-    context = LLMContext(messages)
+    context = LLMContext(messages, tools=tools)
     context_aggregator = LLMContextAggregatorPair(context)
+    llm.register_function("get_current_weather", fetch_weather_from_api)
+    
+    rtvi = RTVIProcessor()
 
-    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
 
     pipeline = Pipeline(
         [
-            transport.input(),  # Transport user input
-            rtvi,  # RTVI processor
+            transport.input(),  
+            rtvi,               # RTVI
             stt,
-            context_aggregator.user(),  # User responses
-            llm,  # LLM
-            tts,  # TTS
-            transport.output(),  # Transport bot output
-            context_aggregator.assistant(),  # Assistant spoken responses
+            context_aggregator.user(),
+            llm,
+            tts,
+            transport.output(), 
+            context_aggregator.assistant(),  
         ]
     )
 
@@ -104,12 +145,19 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
         observers=[RTVIObserver(rtvi)],
     )
+    flow_manager = FlowManager(
+        task=task,
+        llm=llm,
+        context_aggregator=context_aggregator,
+        transport=transport,
+    )
+
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
-        # Kick off the conversation.
-        messages.append({"role": "system", "content": "Say hello and briefly introduce yourself."})
+        # Start recording AFTER handlers registered
+        messages.append({"role": "system", "content": "Saluta e presentati brevemente in italiano."})
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
@@ -118,7 +166,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
-
     await runner.run(task)
 
 
@@ -141,7 +188,7 @@ async def bot(runner_args: RunnerArguments):
     }
 
     transport = await create_transport(runner_args, transport_params)
-
+    logger.info(f"Transport : {transport.name}")
     await run_bot(transport, runner_args)
 
 
